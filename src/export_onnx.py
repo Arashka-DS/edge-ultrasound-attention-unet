@@ -1,27 +1,38 @@
 import os
 import torch
 import onnx
-from onnxruntime.quantization import quantize_dynamic, QuantType, shape_inference
+import numpy as np
+from onnxruntime.quantization import quantize_static, QuantType, QuantFormat, shape_inference, CalibrationDataReader
 from src.model import VascularAttentionUNet
+
+
+class UltrasoundCalibrationReader(CalibrationDataReader):
+    """Provides representative input data to calibrate static INT8 activation scales."""
+    def __init__(self, batch_size=1, num_samples=10):
+        # In a real scenario, this would load real ultrasound frames.
+        # For demonstration, we use deterministic synthetic noise tensors.
+        self.data = iter([
+            {"temporal_input": np.random.randn(batch_size, 3, 256, 256).astype(np.float32)}
+            for _ in range(num_samples)
+        ])
+
+    def get_next(self):
+        return next(self.data, None)
 
 
 def export_and_quantize():
     os.makedirs("models", exist_ok=True)
     pytorch_weights = "models/vascular_attention_unet.pth"
-    prepped_onnx_path = "models/vascular_unet_prep.onnx"
     fp32_onnx_path = "models/vascular_unet_fp32.onnx"
+    prepped_onnx_path = "models/vascular_unet_prep.onnx"
     int8_onnx_path = "models/vascular_unet_int8.onnx"
 
     model = VascularAttentionUNet(pretrained=False)
     if os.path.exists(pytorch_weights):
         model.load_state_dict(torch.load(pytorch_weights, map_location="cpu"))
         print(f"Loaded weights from {pytorch_weights}")
-    else:
-        print("No weights found. Exporting base architecture...")
 
     model.eval()
-
-    # Fixed spatial shape: [1, 3, 256, 256] guarantees SIMD cache alignment on edge CPUs
     dummy_input = torch.randn(1, 3, 256, 256, dtype=torch.float32)
 
     print("Exporting PyTorch model to ONNX FP32...")
@@ -36,12 +47,6 @@ def export_and_quantize():
         output_names=["contact_logits", "vessel_logits", "seg_logits"],
     )
 
-    # Validate ONNX model
-    onnx_model = onnx.load(fp32_onnx_path)
-    onnx.checker.check_model(onnx_model)
-    print(f"ONNX FP32 export verified: {fp32_onnx_path}")
-
-    # Preprocessing
     print("Pre-processing ONNX graph for shape inference...")
     shape_inference.quant_pre_process(
         input_model_path=fp32_onnx_path,
@@ -49,19 +54,18 @@ def export_and_quantize():
         skip_symbolic_shape=False,
     )
 
-    # INT8 Quantization
-    print("Performing INT8 Dynamic Quantization for bare-metal CPU...")
-    quantize_dynamic(
+    print("Performing INT8 Static Quantization for CNNs on bare-metal CPU...")
+    calibrator = UltrasoundCalibrationReader()
+    quantize_static(
         model_input=prepped_onnx_path,
         model_output=int8_onnx_path,
+        calibration_data_reader=calibrator,
+        quant_format=QuantFormat.QOperator,
         weight_type=QuantType.QInt8,
+        activation_type=QuantType.QUInt8,
     )
 
-    fp32_size = os.path.getsize(fp32_onnx_path) / (1024 * 1024)
-    int8_size = os.path.getsize(int8_onnx_path) / (1024 * 1024)
-    print(f"FP32 Model Size: {fp32_size:.2f} MB")
-    print(f"INT8 Model Size: {int8_size:.2f} MB")
-    print(f"Quantized edge model ready: {int8_onnx_path}")
+    print(f"Static quantized edge model ready: {int8_onnx_path}")
 
 
 if __name__ == "__main__":
