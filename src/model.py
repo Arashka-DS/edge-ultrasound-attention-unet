@@ -3,9 +3,33 @@ import torch.nn as nn
 import torchvision.models as models
 
 
-class AttentionGate(nn.Module):
-    """Additive Attention Gate to suppress irrelevant background speckle noise."""
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_c: int, out_c: int):
+        super().__init__()
+        self.depthwise = nn.Conv2d(in_c, in_c, kernel_size=3, padding=1, groups=in_c, bias=False)
+        self.pointwise = nn.Conv2d(in_c, out_c, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_c)
+        self.relu = nn.ReLU(inplace=True)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return self.relu(self.bn(x))
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_c: int, out_c: int):
+        super().__init__()
+        self.conv = nn.Sequential(
+            DepthwiseSeparableConv(in_c, out_c),
+            DepthwiseSeparableConv(out_c, out_c),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class AttentionGate(nn.Module):
     def __init__(self, f_g: int, f_l: int, f_int: int):
         super().__init__()
         self.w_g = nn.Sequential(
@@ -31,79 +55,41 @@ class AttentionGate(nn.Module):
         return x * psi
 
 
-class DepthwiseSeparableConv(nn.Module):
-    def __init__(self, in_c: int, out_c: int):
-        super().__init__()
-        self.depthwise = nn.Conv2d(in_c, in_c, kernel_size=3, padding=1, groups=in_c, bias=False)
-        self.pointwise = nn.Conv2d(in_c, out_c, kernel_size=1, bias=False)
-        self.bn = nn.BatchNorm2d(out_c)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        return self.relu(self.bn(x))
-
-class ConvBlock(nn.Module):
-    """Upgraded to Depthwise Separable Convolutions for extreme edge speed."""
-    def __init__(self, in_c: int, out_c: int):
-        super().__init__()
-        self.conv = nn.Sequential(
-            DepthwiseSeparableConv(in_c, out_c),
-            DepthwiseSeparableConv(out_c, out_c),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
 class VascularAttentionUNet(nn.Module):
-    """
-    Multi-Head Edge Architecture:
-    - Backbone: MobileNetV3-Small (lightweight feature extractor).
-    - Input: [B, 3, H, W] representing a rolling temporal stack [t-2, t-1, t].
-    - Head 1 (Acoustic Contact): Probe on skin vs. acoustic shadow / air.
-    - Head 2 (Vessel Presence): Target artery/vein visible in current cross-section.
-    - Head 3 (Attention Decoder): Dense pixel segmentation mask.
-    """
-
     def __init__(self, pretrained: bool = False):
         super().__init__()
 
-        # Lightweight MobileNetV3 backbone
         weights = models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
         backbone = models.mobilenet_v3_small(weights=weights)
         features = backbone.features
 
-        # Hierarchical Encoder Taps
-        self.enc0 = features[0:1]   # 16 channels, stride 2 (128x128)
-        self.enc1 = features[1:2]   # 16 channels, stride 2 (64x64)
-        self.enc2 = features[2:4]   # 24 channels, stride 2 (32x32)
-        self.enc3 = features[4:9]   # 48 channels, stride 2 (16x16)
-        self.bottleneck = features[9:]  # 576 channels, stride 2 (8x8)
+        self.enc0 = features[0:1]   # [B, 16, 128, 128]
+        self.enc1 = features[1:2]   # [B, 16, 64, 64]
+        self.enc2 = features[2:4]   # [B, 24, 32, 32]
+        self.enc3 = features[4:9]   # [B, 48, 16, 16]
+        self.bottleneck = features[9:]  # [B, 576, 8, 8]
 
-        # Global Average Pooling for classification heads
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
 
-        # Head 1: Acoustic Probe Contact Classifier
+        # Head 1: Acoustic Probe Contact Classifier (with BatchNorm)
         self.head_contact = nn.Sequential(
-            nn.Conv2d(576, 64, kernel_size=1),
+            nn.Conv2d(576, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
             nn.Conv2d(64, 1, kernel_size=1),
-            nn.Flatten(1)
+            nn.Flatten(1),
         )
 
-        # Head 2: Target Vascular Presence Classifier
+        # Head 2: Target Vascular Presence Classifier (with BatchNorm)
         self.head_vessel = nn.Sequential(
-            nn.Conv2d(576, 64, kernel_size=1),
+            nn.Conv2d(576, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
             nn.Conv2d(64, 1, kernel_size=1),
-            nn.Flatten(1)
+            nn.Flatten(1),
         )
 
-        # Decoder Stages with Attention Gates
+        # Decoder Stages
         self.up4 = nn.ConvTranspose2d(576, 48, kernel_size=2, stride=2)
         self.att4 = AttentionGate(f_g=48, f_l=48, f_int=24)
         self.dec4 = ConvBlock(48 + 48, 48)
@@ -120,24 +106,20 @@ class VascularAttentionUNet(nn.Module):
         self.att1 = AttentionGate(f_g=16, f_l=16, f_int=8)
         self.dec1 = ConvBlock(16 + 16, 16)
 
-        # Final projection to 256x256
         self.final_up = nn.ConvTranspose2d(16, 16, kernel_size=2, stride=2)
         self.head_seg = nn.Conv2d(16, 1, kernel_size=1)
 
     def forward(self, x: torch.Tensor):
-        # Encoder forward pass
-        e0 = self.enc0(x)          # [B, 16, 128, 128]
-        e1 = self.enc1(e0)         # [B, 16, 64, 64]
-        e2 = self.enc2(e1)         # [B, 24, 32, 32]
-        e3 = self.enc3(e2)         # [B, 48, 16, 16]
-        b = self.bottleneck(e3)    # [B, 576, 8, 8]
+        e0 = self.enc0(x)
+        e1 = self.enc1(e0)
+        e2 = self.enc2(e1)
+        e3 = self.enc3(e2)
+        b = self.bottleneck(e3)
 
-        # Classification Heads
-        pooled = self.gap(b)       # [B, 576, 1, 1]
-        contact_logit = self.head_contact(pooled) # [B, 1]
-        vessel_logit = self.head_vessel(pooled)   # [B, 1]
+        pooled = self.gap(b)
+        contact_logit = self.head_contact(pooled)
+        vessel_logit = self.head_vessel(pooled)
 
-        # Segmentation Decoder with Skip-Attention Connections
         d4 = self.up4(b)
         x_att4 = self.att4(g=d4, x=e3)
         d4 = self.dec4(torch.cat([x_att4, d4], dim=1))
