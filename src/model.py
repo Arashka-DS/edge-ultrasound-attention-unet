@@ -79,18 +79,20 @@ class VascularAttentionUNet(nn.Module):
 
         # Head 1: Acoustic Probe Contact Classifier
         self.head_contact = nn.Sequential(
-            nn.Linear(576, 64),
+            nn.Conv2d(576, 64, kernel_size=1),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(64, 1),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Flatten(1)
         )
 
         # Head 2: Target Vascular Presence Classifier
         self.head_vessel = nn.Sequential(
-            nn.Linear(576, 64),
+            nn.Conv2d(576, 64, kernel_size=1),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(64, 1),
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Flatten(1)
         )
 
         # Decoder Stages with Attention Gates
@@ -123,9 +125,9 @@ class VascularAttentionUNet(nn.Module):
         b = self.bottleneck(e3)    # [B, 576, 8, 8]
 
         # Classification Heads
-        pooled = torch.flatten(self.gap(b), 1)
-        contact_logit = self.head_contact(pooled)
-        vessel_logit = self.head_vessel(pooled)
+        pooled = self.gap(b)       # [B, 576, 1, 1]
+        contact_logit = self.head_contact(pooled) # [B, 1]
+        vessel_logit = self.head_vessel(pooled)   # [B, 1]
 
         # Segmentation Decoder with Skip-Attention Connections
         d4 = self.up4(b)
