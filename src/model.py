@@ -7,10 +7,11 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_c),
+            # InstanceNorm is immune to Train/Eval drift
+            nn.InstanceNorm2d(out_c, affine=True),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_c),
+            nn.InstanceNorm2d(out_c, affine=True),
             nn.ReLU(inplace=True),
         )
 
@@ -23,15 +24,15 @@ class AttentionGate(nn.Module):
         super().__init__()
         self.w_g = nn.Sequential(
             nn.Conv2d(f_g, f_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(f_int),
+            nn.InstanceNorm2d(f_int, affine=True),
         )
         self.w_x = nn.Sequential(
             nn.Conv2d(f_l, f_int, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(f_int),
+            nn.InstanceNorm2d(f_int, affine=True),
         )
         self.psi = nn.Sequential(
             nn.Conv2d(f_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.BatchNorm2d(1),
+            nn.InstanceNorm2d(1, affine=True),
             nn.Sigmoid(),
         )
         self.relu = nn.ReLU(inplace=True)
@@ -45,22 +46,26 @@ class AttentionGate(nn.Module):
 
 
 class VascularAttentionUNet(nn.Module):
-    def __init__(self, pretrained: bool = False):
+    def __init__(self, pretrained: bool = True):
         super().__init__()
 
         weights = models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
         backbone = models.mobilenet_v3_small(weights=weights)
-        features = backbone.features
+        self.features = backbone.features
 
-        self.enc0 = features[0:1]   
-        self.enc1 = features[1:2]   
-        self.enc2 = features[2:4]   
-        self.enc3 = features[4:9]   
-        self.bottleneck = features[9:]  
+        # SRE FIX: Freeze the ImageNet backbone to prevent catastrophic forgetting
+        # and lock its internal BatchNorm running statistics.
+        for param in self.features.parameters():
+            param.requires_grad = False
+
+        self.enc0 = self.features[0:1]   
+        self.enc1 = self.features[1:2]   
+        self.enc2 = self.features[2:4]   
+        self.enc3 = self.features[4:9]   
+        self.bottleneck = self.features[9:]  
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
 
-        # STANDARD LINEAR HEADS: Mathematically stable, no Train/Eval drift.
         self.head_contact = nn.Sequential(
             nn.Linear(576, 64),
             nn.ReLU(inplace=True),
@@ -94,6 +99,11 @@ class VascularAttentionUNet(nn.Module):
         self.final_up = nn.ConvTranspose2d(16, 16, kernel_size=2, stride=2)
         self.head_seg = nn.Conv2d(16, 1, kernel_size=1)
 
+    def train(self, mode=True):
+        """Override train mode to force the frozen backbone to stay in eval()."""
+        super().train(mode)
+        self.features.eval()
+
     def forward(self, x: torch.Tensor):
         e0 = self.enc0(x)
         e1 = self.enc1(e0)
@@ -101,7 +111,6 @@ class VascularAttentionUNet(nn.Module):
         e3 = self.enc3(e2)
         b = self.bottleneck(e3)
 
-        # Flattened explicitly for the stable Linear layers
         pooled = torch.flatten(self.gap(b), 1)
         contact_logit = self.head_contact(pooled)
         vessel_logit = self.head_vessel(pooled)
