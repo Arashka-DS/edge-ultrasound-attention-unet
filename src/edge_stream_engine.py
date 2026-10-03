@@ -52,7 +52,6 @@ class EdgeStreamEngine:
                 ret, frame = cap.read()
 
             if not ret:
-                # Reverted to hard-edged boolean masks to perfectly match dataset.py distribution
                 gray_256 = np.random.rayleigh(scale=85, size=(256, 256))
                 cx, cy = 128, 128
 
@@ -60,7 +59,7 @@ class EdgeStreamEngine:
                 ry = 24 + int(6 * np.sin(t_step * 0.25))
 
                 y, x = np.ogrid[:256, :256]
-                lumen = ((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2) <= 1.0
+                lumen = ((x - cx) ** 2) / (rx ** 2) + ((y - cy) ** 2) / (ry ** 2) <= 1.0
                 gray_256[lumen] = gray_256[lumen] * 0.25
 
                 frame_uint8 = np.clip(gray_256, 0, 255).astype(np.uint8)
