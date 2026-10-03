@@ -37,8 +37,8 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
     dataset = TemporalUltrasoundDataset(num_samples=160, img_size=256)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    model = VascularAttentionUNet(pretrained=False).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    model = VascularAttentionUNet(pretrained=True).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
     criterion_bce = nn.BCEWithLogitsLoss()
     criterion_dice = DiceLoss()
@@ -61,8 +61,7 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
 
             l_contact = criterion_bce(contact_logits, contacts)
             l_vessel = criterion_bce(vessel_logits, vessels)
-            l_seg = criterion_dice(seg_logits, masks) + criterion_bce(seg_logits, masks)
-
+            l_seg = (2.0 * criterion_dice(seg_logits, masks)) + criterion_bce(seg_logits, masks)
             total_loss = (0.2 * l_contact) + (0.3 * l_vessel) + (1.0 * l_seg)
             total_loss.backward()
             optimizer.step()
