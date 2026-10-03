@@ -51,22 +51,17 @@ class EdgeStreamEngine:
             if cap is not None:
                 ret, frame = cap.read()
 
-            if not ret:
-                # Upgraded Synthetic Simulator: Native 256x256 with smooth anti-aliased lumen
+if not ret:
+                # Reverted to hard-edged boolean masks to perfectly match dataset.py distribution
                 gray_256 = np.random.rayleigh(scale=85, size=(256, 256))
                 cx, cy = 128, 128
 
-                # Smoother pulsatile dynamics
-                rx = 32.0 + 6.0 * np.sin(t_step * 0.25)
-                ry = 24.0 + 6.0 * np.sin(t_step * 0.25)
+                rx = 32 + int(6 * np.sin(t_step * 0.25))
+                ry = 24 + int(6 * np.sin(t_step * 0.25))
 
                 y, x = np.ogrid[:256, :256]
-                # Calculate distance field for anti-aliasing the vessel edge
-                dist = np.sqrt(((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2))
-                
-                # Soft blending for vessel walls
-                lumen_mask = np.clip(1.5 - dist, 0.0, 1.0)
-                gray_256 = gray_256 * (1.0 - (0.75 * lumen_mask))
+                lumen = ((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2) <= 1.0
+                gray_256[lumen] = gray_256[lumen] * 0.25
 
                 frame_uint8 = np.clip(gray_256, 0, 255).astype(np.uint8)
                 norm_frame, _ = self.preprocessor.process_frame(frame_uint8, target_size=256)
@@ -99,7 +94,12 @@ class EdgeStreamEngine:
                 continue
 
             t_start = time.perf_counter()
-            outputs = self.session.run(None, {"temporal_input": tensor})
+            
+            # Explicitly request output names to prevent ONNX graph alphabetical swapping
+            outputs = self.session.run(
+                ["contact_logits", "vessel_logits", "seg_logits"], 
+                {"temporal_input": tensor}
+            )
             contact_logit, vessel_logit, seg_logits = outputs[0][0][0], outputs[1][0][0], outputs[2][0][0]
 
             contact_prob = 1.0 / (1.0 + np.exp(-contact_logit))
