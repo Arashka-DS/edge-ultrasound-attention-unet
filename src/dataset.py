@@ -15,8 +15,10 @@ class TemporalUltrasoundDataset(Dataset):
 
     def __getitem__(self, idx: int):
         frames = []
-        has_contact = 1.0 if np.random.rand() > 0.15 else 0.0
-        has_vessel = 1.0 if (has_contact and np.random.rand() > 0.20) else 0.0
+        # Force a balanced dataset to prevent mode collapse
+        has_contact = 1.0 if np.random.rand() > 0.10 else 0.0
+        # If contact is made, force a 75% chance of a vessel appearing
+        has_vessel = 1.0 if (has_contact and np.random.rand() < 0.75) else 0.0
 
         mask = np.zeros((self.img_size, self.img_size), dtype=np.float32)
         cx, cy = self.img_size // 2, self.img_size // 2
