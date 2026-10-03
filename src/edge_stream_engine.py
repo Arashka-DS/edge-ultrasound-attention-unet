@@ -8,15 +8,14 @@ import numpy as np
 import onnxruntime as ort
 from src.postprocessing import UltrasoundPreprocessor, TemporalMaskStabilizer, overlay_mask
 
-
 class EdgeStreamEngine:
-    def __init__(self, model_path: str = "models/vascular_unet_int8.onnx", source=0):
+    # Change default source to None to bypass hardware camera checks completely
+    def __init__(self, model_path: str = "models/vascular_unet_int8.onnx", source=None):
         self.source = source
         self.frame_queue = queue.Queue(maxsize=2)
         self.result_queue = queue.Queue(maxsize=2)
         self.stopped = False
 
-        # Session configuration for bare-metal edge CPU execution
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 2
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -31,15 +30,19 @@ class EdgeStreamEngine:
 
     def capture_worker(self):
         """Thread 1: Ingests frames and buffers the 3-frame temporal window."""
-        cap = cv2.VideoCapture(self.source)
+        # Only initialize VideoCapture if a physical source is explicitly requested
+        cap = cv2.VideoCapture(self.source) if self.source is not None else None
         temporal_buffer = collections.deque(maxlen=3)
         t_step = 0
 
         while not self.stopped:
-            ret, frame = cap.read()
+            ret = False
+            if cap is not None and cap.isOpened():
+                ret, frame = cap.read()
+                
             if not ret:
-                # Synthetic fallback loop: Generates a realistic pulsing vascular lumen
-                gray = np.random.rayleigh(scale=60, size=(480, 640))
+                # Synthetic fallback loop matching the EXACT scale=85 training distribution
+                gray = np.random.rayleigh(scale=85, size=(480, 640))
                 cx, cy = 320, 240
                 
                 # Simulate cardiac pulsation using a sine wave
@@ -48,26 +51,26 @@ class EdgeStreamEngine:
                 
                 y, x = np.ogrid[:480, :640]
                 lumen = ((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2) <= 1.0
-                gray[lumen] = gray[lumen] * 0.2
+                
+                # Match the 0.25 anechoic fluid darkness from dataset.py
+                gray[lumen] = gray[lumen] * 0.25
                 
                 frame = np.clip(gray, 0, 255).astype(np.uint8)
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
                 
                 t_step += 1
-                time.sleep(0.04) # Enforce a realistic 25 FPS frame rate limit
+                time.sleep(0.04)  # Enforce ~25 FPS frame rate limit
 
             norm_frame, enhanced = self.preprocessor.process_frame(frame, target_size=256)
             temporal_buffer.append(norm_frame)
 
-            # Wait until 3 consecutive frames are buffered
             if len(temporal_buffer) == 3:
-                stacked_tensor = np.stack(list(temporal_buffer), axis=0)[np.newaxis, ...]  # [1, 3, 256, 256]
+                stacked_tensor = np.stack(list(temporal_buffer), axis=0)[np.newaxis, ...]
                 if not self.frame_queue.full():
                     self.frame_queue.put((frame, stacked_tensor))
 
-            time.sleep(0.01)
-
-        cap.release()
+        if cap is not None:
+            cap.release()
 
     def inference_worker(self):
         """Thread 2: Executes conditional ONNX inference and postprocessing."""
@@ -78,70 +81,28 @@ class EdgeStreamEngine:
                 continue
 
             t_start = time.perf_counter()
-
-            # Execute ONNX INT8 session
             outputs = self.session.run(None, {"temporal_input": tensor})
-            contact_logit = outputs[0][0][0]
-            vessel_logit = outputs[1][0][0]
-            seg_logits = outputs[2][0][0]
+            contact_logit, vessel_logit, seg_logits = outputs[0][0][0], outputs[1][0][0], outputs[2][0][0]
 
             contact_prob = 1.0 / (1.0 + np.exp(-contact_logit))
             vessel_prob = 1.0 / (1.0 + np.exp(-vessel_logit))
 
-            # -----------------------------------------------------------------
-            # Conditional Compute Evaluation
-            # -----------------------------------------------------------------
             display_frame = raw_frame.copy()
             latency_ms = (time.perf_counter() - t_start) * 1000
 
             if contact_prob < 0.50:
                 self.stabilizer.reset()
-                cv2.putText(
-                    display_frame,
-                    "PROBE STATUS: NO ACOUSTIC CONTACT",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2,
-                )
+                cv2.putText(display_frame, "PROBE STATUS: NO ACOUSTIC CONTACT", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             elif vessel_prob < 0.50:
                 self.stabilizer.reset()
-                cv2.putText(
-                    display_frame,
-                    "SCANNING: NO VESSEL IN PLANE",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 165, 255),
-                    2,
-                )
+                cv2.putText(display_frame, "SCANNING: NO VESSEL IN PLANE", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
             else:
-                # Vessel detected: evaluate segmentation mask and apply temporal smoothing
                 raw_mask = (seg_logits > 0.0).astype(np.uint8)
                 smoothed_mask = self.stabilizer.update(raw_mask)
                 display_frame = overlay_mask(display_frame, smoothed_mask, color=(0, 255, 0), alpha=0.45)
+                cv2.putText(display_frame, f"VESSEL DETECTED ({vessel_prob*100:.1f}%)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                cv2.putText(
-                    display_frame,
-                    f"VESSEL DETECTED ({vessel_prob*100:.1f}%)",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2,
-                )
-
-            # Telemetry display
-            cv2.putText(
-                display_frame,
-                f"Latency: {latency_ms:.1f} ms | FPS: {1000/max(latency_ms, 1.0):.1f}",
-                (20, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                1,
-            )
+            cv2.putText(display_frame, f"Latency: {latency_ms:.1f} ms | FPS: {1000/max(latency_ms, 1.0):.1f}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
             if not self.result_queue.full():
                 self.result_queue.put(display_frame)
@@ -149,7 +110,6 @@ class EdgeStreamEngine:
     def run(self):
         t_cap = threading.Thread(target=self.capture_worker, daemon=True)
         t_inf = threading.Thread(target=self.inference_worker, daemon=True)
-
         t_cap.start()
         t_inf.start()
         print("Engine initialized. Press 'q' to terminate stream.")
@@ -168,7 +128,7 @@ class EdgeStreamEngine:
             self.stopped = True
             cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
-    engine = EdgeStreamEngine(model_path="models/vascular_unet_int8.onnx", source=0)
+    # Explicitly set source=None to default to the synthetic pulsatile stream
+    engine = EdgeStreamEngine(model_path="models/vascular_unet_int8.onnx", source=None)
     engine.run()
