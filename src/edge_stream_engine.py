@@ -77,7 +77,8 @@ class EdgeStreamEngine:
             temporal_buffer.append(norm_frame)
 
             if len(temporal_buffer) == 3:
-                stacked_tensor = np.stack(list(temporal_buffer), axis=0)[np.newaxis, ...]
+                # Force exact float32 type matching
+                stacked_tensor = np.stack(list(temporal_buffer), axis=0)[np.newaxis, ...].astype(np.float32)
                 if not self.frame_queue.full():
                     self.frame_queue.put((display_frame, stacked_tensor))
 
