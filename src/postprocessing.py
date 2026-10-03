@@ -50,6 +50,10 @@ class UltrasoundPreprocessor:
 
 def overlay_mask(base_image_bgr: np.ndarray, binary_mask: np.ndarray, color=(0, 255, 0), alpha=0.45) -> np.ndarray:
     """Alpha-blends the predicted vascular segmentation mask directly over the live feed."""
+    # Safety Check: Convert 1-channel grayscale to 3-channel BGR for colored masks
+    if len(base_image_bgr.shape) == 2:
+        base_image_bgr = cv2.cvtColor(base_image_bgr, cv2.COLOR_GRAY2BGR)
+
     h, w = base_image_bgr.shape[:2]
     mask_resized = cv2.resize(binary_mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
