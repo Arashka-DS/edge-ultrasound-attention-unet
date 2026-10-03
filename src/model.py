@@ -2,32 +2,21 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-
-class DepthwiseSeparableConv(nn.Module):
-    def __init__(self, in_c: int, out_c: int):
-        super().__init__()
-        self.depthwise = nn.Conv2d(in_c, in_c, kernel_size=3, padding=1, groups=in_c, bias=False)
-        self.pointwise = nn.Conv2d(in_c, out_c, kernel_size=1, bias=False)
-        self.bn = nn.BatchNorm2d(out_c)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        return self.relu(self.bn(x))
-
-
 class ConvBlock(nn.Module):
+    """Standard convolutions restore fast gradient flow for 5-epoch convergence."""
     def __init__(self, in_c: int, out_c: int):
         super().__init__()
         self.conv = nn.Sequential(
-            DepthwiseSeparableConv(in_c, out_c),
-            DepthwiseSeparableConv(out_c, out_c),
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
-
 
 class AttentionGate(nn.Module):
     def __init__(self, f_g: int, f_l: int, f_int: int):
@@ -139,3 +128,37 @@ class VascularAttentionUNet(nn.Module):
         out_mask = self.head_seg(self.final_up(d1))
 
         return contact_logit, vessel_logit, out_mask
+
+# ========================================================================================================
+# FUTURE HARDWARE PROFILING: Depthwise Separable Convolutions
+# Note: Retained as architectural scaffolding. Depthwise Separable Convultions while cutting down
+# the parameters and boosting speed significantly, are unusable on such a small database (160 samples)
+# and such small epoch numbers (5 epochs), and will collapse the model and zero our Dice and IoU scores.
+# We will just retain it here to then uncomment and calibrate on bigger (1000s to 10000s frame) clinical
+# datasets with better hardware and higher training epochs.
+# ========================================================================================================
+
+#class DepthwiseSeparableConv(nn.Module):
+#    def __init__(self, in_c: int, out_c: int):
+#        super().__init__()
+#        self.depthwise = nn.Conv2d(in_c, in_c, kernel_size=3, padding=1, groups=in_c, bias=False)
+#        self.pointwise = nn.Conv2d(in_c, out_c, kernel_size=1, bias=False)
+#        self.bn = nn.BatchNorm2d(out_c)
+#        self.relu = nn.ReLU(inplace=True)
+#
+#    def forward(self, x: torch.Tensor) -> torch.Tensor:
+#        x = self.depthwise(x)
+#        x = self.pointwise(x)
+#        return self.relu(self.bn(x))
+#
+#
+#class ConvBlock(nn.Module):
+#    def __init__(self, in_c: int, out_c: int):
+#        super().__init__()
+#        self.conv = nn.Sequential(
+#            DepthwiseSeparableConv(in_c, out_c),
+#            DepthwiseSeparableConv(out_c, out_c),
+#        )
+#
+#    def forward(self, x: torch.Tensor) -> torch.Tensor:
+#        return self.conv(x)
