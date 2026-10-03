@@ -3,7 +3,6 @@ import torch.nn as nn
 import torchvision.models as models
 
 class ConvBlock(nn.Module):
-    """Standard convolutions restore fast gradient flow for 5-epoch convergence."""
     def __init__(self, in_c: int, out_c: int):
         super().__init__()
         self.conv = nn.Sequential(
@@ -17,6 +16,7 @@ class ConvBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
+
 
 class AttentionGate(nn.Module):
     def __init__(self, f_g: int, f_l: int, f_int: int):
@@ -52,34 +52,29 @@ class VascularAttentionUNet(nn.Module):
         backbone = models.mobilenet_v3_small(weights=weights)
         features = backbone.features
 
-        self.enc0 = features[0:1]   # [B, 16, 128, 128]
-        self.enc1 = features[1:2]   # [B, 16, 64, 64]
-        self.enc2 = features[2:4]   # [B, 24, 32, 32]
-        self.enc3 = features[4:9]   # [B, 48, 16, 16]
-        self.bottleneck = features[9:]  # [B, 576, 8, 8]
+        self.enc0 = features[0:1]   
+        self.enc1 = features[1:2]   
+        self.enc2 = features[2:4]   
+        self.enc3 = features[4:9]   
+        self.bottleneck = features[9:]  
 
-        # Global Average Pooling for classification heads
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
 
-        # Head 1: Acoustic Probe Contact Classifier (Zero BatchNorm Drift)
+        # STANDARD LINEAR HEADS: Mathematically stable, no Train/Eval drift.
         self.head_contact = nn.Sequential(
-            nn.Conv2d(576, 64, kernel_size=1, bias=True),
+            nn.Linear(576, 64),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Conv2d(64, 1, kernel_size=1, bias=True),
-            nn.Flatten(1),
+            nn.Linear(64, 1),
         )
 
-        # Head 2: Target Vascular Presence Classifier (Zero BatchNorm Drift)
         self.head_vessel = nn.Sequential(
-            nn.Conv2d(576, 64, kernel_size=1, bias=True),
+            nn.Linear(576, 64),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Conv2d(64, 1, kernel_size=1, bias=True),
-            nn.Flatten(1),
+            nn.Linear(64, 1),
         )
 
-        # Decoder Stages
         self.up4 = nn.ConvTranspose2d(576, 48, kernel_size=2, stride=2)
         self.att4 = AttentionGate(f_g=48, f_l=48, f_int=24)
         self.dec4 = ConvBlock(48 + 48, 48)
@@ -106,7 +101,8 @@ class VascularAttentionUNet(nn.Module):
         e3 = self.enc3(e2)
         b = self.bottleneck(e3)
 
-        pooled = self.gap(b)
+        # Flattened explicitly for the stable Linear layers
+        pooled = torch.flatten(self.gap(b), 1)
         contact_logit = self.head_contact(pooled)
         vessel_logit = self.head_vessel(pooled)
 
