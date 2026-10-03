@@ -21,15 +21,14 @@ class DiceLoss(nn.Module):
         )
         return 1.0 - dice
 
-def calculate_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5):
-    """Calculates Dice Score and Intersection over Union (IoU)."""
+def calculate_metrics_components(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5):
+    """Returns the raw intersection and union counts for epoch aggregation."""
     preds = (torch.sigmoid(logits) > threshold).float()
-    intersection = (preds * targets).sum()
-    union = preds.sum() + targets.sum() - intersection
-    
-    iou = (intersection + 1e-6) / (union + 1e-6)
-    dice = (2.0 * intersection + 1e-6) / (preds.sum() + targets.sum() + 1e-6)
-    return dice.item(), iou.item()
+    intersection = (preds * targets).sum().item()
+    pred_sum = preds.sum().item()
+    target_sum = targets.sum().item()
+    union = pred_sum + target_sum - intersection
+    return intersection, union, pred_sum, target_sum
 
 def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,6 +46,10 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
     model.train()
     for epoch in range(1, epochs + 1):
         running_loss = 0.0
+        epoch_intersection = 0.0
+        epoch_union = 0.0
+        epoch_pred_sum = 0.0
+        epoch_target_sum = 0.0
         for batch in loader:
             imgs = batch["image"].to(device)
             masks = batch["mask"].to(device)
@@ -56,7 +59,6 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
             optimizer.zero_grad()
             contact_logits, vessel_logits, seg_logits = model(imgs)
 
-            # Combined multi-task objective
             l_contact = criterion_bce(contact_logits, contacts)
             l_vessel = criterion_bce(vessel_logits, vessels)
             l_seg = criterion_dice(seg_logits, masks) + criterion_bce(seg_logits, masks)
@@ -66,10 +68,19 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
             optimizer.step()
 
             running_loss += total_loss.item()
-            dice_score, iou_score = calculate_metrics(seg_logits, masks)
+            
+            # Aggregate metrics components
+            inter, uni, p_sum, t_sum = calculate_metrics_components(seg_logits, masks)
+            epoch_intersection += inter
+            epoch_union += uni
+            epoch_pred_sum += p_sum
+            epoch_target_sum += t_sum
 
         epoch_loss = running_loss / len(loader)
-        print(f"Epoch [{epoch}/{epochs}] — Loss: {epoch_loss:.4f} | Val Dice: {dice_score:.4f} | Val IoU: {iou_score:.4f}")
+        epoch_iou = (epoch_intersection + 1e-6) / (epoch_union + 1e-6)
+        epoch_dice = (2.0 * epoch_intersection + 1e-6) / (epoch_pred_sum + epoch_target_sum + 1e-6)
+        
+        print(f"Epoch [{epoch}/{epochs}] — Loss: {epoch_loss:.4f} | Val Dice: {epoch_dice:.4f} | Val IoU: {epoch_iou:.4f}")
 
     os.makedirs("models", exist_ok=True)
     save_path = "models/vascular_attention_unet.pth"
