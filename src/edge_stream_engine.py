@@ -171,5 +171,6 @@ class EdgeStreamEngine:
 
 
 if __name__ == "__main__":
-    engine = EdgeStreamEngine(model_path="models/vascular_unet_int8.onnx", source=None)
+    # Engine now loads the FP16 edge model
+    engine = EdgeStreamEngine(model_path="models/vascular_unet_fp16.onnx", source=None)
     engine.run()
