@@ -29,7 +29,7 @@ def export_and_quantize():
         dummy_input,
         fp32_onnx_path,
         export_params=True,
-        opset_version >= 18,
+        opset_version=20,
         do_constant_folding=True,
         input_names=["temporal_input"],
         output_names=["contact_logits", "vessel_logits", "seg_logits"],
