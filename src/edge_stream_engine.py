@@ -33,12 +33,28 @@ class EdgeStreamEngine:
         """Thread 1: Ingests frames and buffers the 3-frame temporal window."""
         cap = cv2.VideoCapture(self.source)
         temporal_buffer = collections.deque(maxlen=3)
+        t_step = 0
 
         while not self.stopped:
             ret, frame = cap.read()
             if not ret:
-                # Synthetic fallback loop for demonstration if no USB probe is plugged in
-                frame = np.random.randint(40, 200, (480, 640, 3), dtype=np.uint8)
+                # Synthetic fallback loop: Generates a realistic pulsing vascular lumen
+                gray = np.random.rayleigh(scale=60, size=(480, 640))
+                cx, cy = 320, 240
+                
+                # Simulate cardiac pulsation using a sine wave
+                rx = 45 + int(8 * np.sin(t_step * 0.3))
+                ry = 35 + int(8 * np.sin(t_step * 0.3))
+                
+                y, x = np.ogrid[:480, :640]
+                lumen = ((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2) <= 1.0
+                gray[lumen] = gray[lumen] * 0.2
+                
+                frame = np.clip(gray, 0, 255).astype(np.uint8)
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                
+                t_step += 1
+                time.sleep(0.04) # Enforce a realistic 25 FPS frame rate limit
 
             norm_frame, enhanced = self.preprocessor.process_frame(frame, target_size=256)
             temporal_buffer.append(norm_frame)
