@@ -35,8 +35,12 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
 
-    dataset = TemporalUltrasoundDataset(num_samples=160, img_size=256)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    # Training and Validation sets
+    train_dataset = TemporalUltrasoundDataset(num_samples=160, img_size=256)
+    val_dataset = TemporalUltrasoundDataset(num_samples=32, img_size=256)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     model = VascularAttentionUNet(pretrained=True).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -44,18 +48,11 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
     criterion_bce = nn.BCEWithLogitsLoss()
     criterion_dice = DiceLoss()
 
-    model.train()
     for epoch in range(1, epochs + 1):
+        # ------------------ TRAINING ------------------
+        model.train()
         running_loss = 0.0
-        epoch_intersection = 0.0
-        epoch_union = 0.0
-        epoch_pred_sum = 0.0
-        epoch_target_sum = 0.0
-        correct_contact = 0
-        correct_vessel = 0
-        total_samples = 0
-
-        for batch in loader:
+        for batch in train_loader:
             imgs = batch["image"].to(device)
             masks = batch["mask"].to(device)
             contacts = batch["contact_label"].to(device)
@@ -68,43 +65,61 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
             l_vessel = criterion_bce(vessel_logits, vessels)
             l_seg = (2.0 * criterion_dice(seg_logits, masks)) + criterion_bce(seg_logits, masks)
 
-            # Balanced 1.0 multi-task objective
             total_loss = (1.0 * l_contact) + (1.0 * l_vessel) + (1.0 * l_seg)
             total_loss.backward()
             optimizer.step()
 
             running_loss += total_loss.item()
 
-            # Classification accuracy tracking
-            pred_contact = (torch.sigmoid(contact_logits) > 0.5).float()
-            pred_vessel = (torch.sigmoid(vessel_logits) > 0.5).float()
-            correct_contact += (pred_contact == contacts).sum().item()
-            correct_vessel += (pred_vessel == vessels).sum().item()
-            total_samples += contacts.size(0)
+        train_loss = running_loss / len(train_loader)
 
-            # Segmentation tracking
-            inter, uni, p_sum, t_sum = calculate_metrics_components(seg_logits, masks)
-            epoch_intersection += inter
-            epoch_union += uni
-            epoch_pred_sum += p_sum
-            epoch_target_sum += t_sum
+        # ------------------ EVALUATION (model.eval()) ------------------
+        model.eval()
+        val_intersection = 0.0
+        val_union = 0.0
+        val_pred_sum = 0.0
+        val_target_sum = 0.0
+        val_correct_contact = 0
+        val_correct_vessel = 0
+        val_total = 0
 
-        epoch_loss = running_loss / len(loader)
-        epoch_iou = (epoch_intersection + 1e-6) / (epoch_union + 1e-6)
-        epoch_dice = (2.0 * epoch_intersection + 1e-6) / (epoch_pred_sum + epoch_target_sum + 1e-6)
-        contact_acc = correct_contact / total_samples
-        vessel_acc = correct_vessel / total_samples
+        with torch.no_grad():
+            for batch in val_loader:
+                imgs = batch["image"].to(device)
+                masks = batch["mask"].to(device)
+                contacts = batch["contact_label"].to(device)
+                vessels = batch["vessel_label"].to(device)
+
+                contact_logits, vessel_logits, seg_logits = model(imgs)
+
+                pred_c = (torch.sigmoid(contact_logits) > 0.5).float()
+                pred_v = (torch.sigmoid(vessel_logits) > 0.5).float()
+
+                val_correct_contact += (pred_c == contacts).sum().item()
+                val_correct_vessel += (pred_v == vessels).sum().item()
+                val_total += contacts.size(0)
+
+                inter, uni, p_sum, t_sum = calculate_metrics_components(seg_logits, masks)
+                val_intersection += inter
+                val_union += uni
+                val_pred_sum += p_sum
+                val_target_sum += t_sum
+
+        val_dice = (2.0 * val_intersection + 1e-6) / (val_pred_sum + val_target_sum + 1e-6)
+        val_iou = (val_intersection + 1e-6) / (val_union + 1e-6)
+        val_contact_acc = (val_correct_contact / val_total) * 100
+        val_vessel_acc = (val_correct_vessel / val_total) * 100
 
         print(
-            f"Epoch [{epoch}/{epochs}] — Loss: {epoch_loss:.4f} | "
-            f"Contact Acc: {contact_acc*100:.1f}% | Vessel Acc: {vessel_acc*100:.1f}% | "
-            f"Val Dice: {epoch_dice:.4f} | Val IoU: {epoch_iou:.4f}"
+            f"Epoch [{epoch}/{epochs}] — Train Loss: {train_loss:.4f} | "
+            f"Eval Contact: {val_contact_acc:.1f}% | Eval Vessel: {val_vessel_acc:.1f}% | "
+            f"Eval Dice: {val_dice:.4f} | Eval IoU: {val_iou:.4f}"
         )
 
     os.makedirs("models", exist_ok=True)
     save_path = "models/vascular_attention_unet.pth"
     torch.save(model.state_dict(), save_path)
-    print(f"Checkpoint successfully saved to: {save_path}")
+    print(f"Model saved to: {save_path}")
 
 
 if __name__ == "__main__":
