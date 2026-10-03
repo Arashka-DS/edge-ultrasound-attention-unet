@@ -58,23 +58,24 @@ class VascularAttentionUNet(nn.Module):
         self.enc3 = features[4:9]   # [B, 48, 16, 16]
         self.bottleneck = features[9:]  # [B, 576, 8, 8]
 
+        # Global Average Pooling for classification heads
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
 
-        # Head 1: Acoustic Probe Contact Classifier (with BatchNorm)
+        # Head 1: Acoustic Probe Contact Classifier (Zero BatchNorm Drift)
         self.head_contact = nn.Sequential(
-            nn.Conv2d(576, 64, kernel_size=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(576, 64, kernel_size=1, bias=True),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Dropout(0.2),
+            nn.Conv2d(64, 1, kernel_size=1, bias=True),
             nn.Flatten(1),
         )
 
-        # Head 2: Target Vascular Presence Classifier (with BatchNorm)
+        # Head 2: Target Vascular Presence Classifier (Zero BatchNorm Drift)
         self.head_vessel = nn.Sequential(
-            nn.Conv2d(576, 64, kernel_size=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(576, 64, kernel_size=1, bias=True),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Dropout(0.2),
+            nn.Conv2d(64, 1, kernel_size=1, bias=True),
             nn.Flatten(1),
         )
 
