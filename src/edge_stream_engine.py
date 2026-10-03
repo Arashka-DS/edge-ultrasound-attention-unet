@@ -28,9 +28,8 @@ class EdgeStreamEngine:
         self.preprocessor = UltrasoundPreprocessor()
         self.stabilizer = TemporalMaskStabilizer(alpha=0.7)
 
-    def capture_worker(self):
+def capture_worker(self):
         """Thread 1: Ingests frames and buffers the 3-frame temporal window."""
-        # Only initialize VideoCapture if a physical source is explicitly requested
         cap = cv2.VideoCapture(self.source) if self.source is not None else None
         temporal_buffer = collections.deque(maxlen=3)
         t_step = 0
@@ -41,33 +40,40 @@ class EdgeStreamEngine:
                 ret, frame = cap.read()
                 
             if not ret:
-                # Synthetic fallback loop matching the EXACT scale=85 training distribution
-                gray = np.random.rayleigh(scale=85, size=(480, 640))
-                cx, cy = 320, 240
+                # FIX: Generate noise natively at 256x256 to preserve spatial high-frequencies
+                gray_256 = np.random.rayleigh(scale=85, size=(256, 256))
+                cx, cy = 128, 128
                 
-                # Simulate cardiac pulsation using a sine wave
-                rx = 45 + int(8 * np.sin(t_step * 0.3))
-                ry = 35 + int(8 * np.sin(t_step * 0.3))
+                # Simulate cardiac pulsation using a sine wave scaled for a 256px grid
+                rx = 28 + int(5 * np.sin(t_step * 0.3))
+                ry = 20 + int(5 * np.sin(t_step * 0.3))
                 
-                y, x = np.ogrid[:480, :640]
+                y, x = np.ogrid[:256, :256]
                 lumen = ((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2) <= 1.0
                 
-                # Match the 0.25 anechoic fluid darkness from dataset.py
-                gray[lumen] = gray[lumen] * 0.25
+                # Match the 0.25 anechoic fluid darkness from the training distribution
+                gray_256[lumen] = gray_256[lumen] * 0.25
+                frame_uint8 = np.clip(gray_256, 0, 255).astype(np.uint8)
                 
-                frame = np.clip(gray, 0, 255).astype(np.uint8)
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                # Process the native 256x256 frame identically to dataset.py
+                norm_frame, _ = self.preprocessor.process_frame(frame_uint8, target_size=256)
+                
+                # Scale up to 640x480 ONLY for the UI display window
+                display_frame = cv2.resize(frame_uint8, (640, 480), interpolation=cv2.INTER_LINEAR)
+                display_frame = cv2.cvtColor(display_frame, cv2.COLOR_GRAY2BGR)
                 
                 t_step += 1
                 time.sleep(0.04)  # Enforce ~25 FPS frame rate limit
+            else:
+                norm_frame, _ = self.preprocessor.process_frame(frame, target_size=256)
+                display_frame = frame
 
-            norm_frame, enhanced = self.preprocessor.process_frame(frame, target_size=256)
             temporal_buffer.append(norm_frame)
 
             if len(temporal_buffer) == 3:
                 stacked_tensor = np.stack(list(temporal_buffer), axis=0)[np.newaxis, ...]
                 if not self.frame_queue.full():
-                    self.frame_queue.put((frame, stacked_tensor))
+                    self.frame_queue.put((display_frame, stacked_tensor))
 
         if cap is not None:
             cap.release()
