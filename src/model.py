@@ -31,18 +31,26 @@ class AttentionGate(nn.Module):
         return x * psi
 
 
-class ConvBlock(nn.Module):
-    """Standard double convolution block for decoder stages."""
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_c: int, out_c: int):
+        super().__init__()
+        self.depthwise = nn.Conv2d(in_c, in_c, kernel_size=3, padding=1, groups=in_c, bias=False)
+        self.pointwise = nn.Conv2d(in_c, out_c, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_c)
+        self.relu = nn.ReLU(inplace=True)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return self.relu(self.bn(x))
+
+class ConvBlock(nn.Module):
+    """Upgraded to Depthwise Separable Convolutions for extreme edge speed."""
     def __init__(self, in_c: int, out_c: int):
         super().__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_c),
-            nn.ReLU(inplace=True),
+            DepthwiseSeparableConv(in_c, out_c),
+            DepthwiseSeparableConv(out_c, out_c),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
