@@ -4,21 +4,20 @@ import onnx
 import numpy as np
 from onnxruntime.quantization import quantize_static, QuantType, QuantFormat, shape_inference, CalibrationDataReader
 from src.model import VascularAttentionUNet
-
+from src.dataset import TemporalUltrasoundDataset
 
 class UltrasoundCalibrationReader(CalibrationDataReader):
     """Provides representative input data to calibrate static INT8 activation scales."""
-    def __init__(self, batch_size=1, num_samples=10):
-        # In a real scenario, this would load real ultrasound frames.
-        # For demonstration, we use deterministic synthetic noise tensors.
+    def __init__(self, batch_size=1, num_samples=16):
+        # Generate exact representative ultrasound frames for hardware calibration
+        dataset = TemporalUltrasoundDataset(num_samples=num_samples, img_size=256)
         self.data = iter([
-            {"temporal_input": np.random.randn(batch_size, 3, 256, 256).astype(np.float32)}
-            for _ in range(num_samples)
+            {"temporal_input": dataset[i]["image"].unsqueeze(0).numpy()}
+            for i in range(num_samples)
         ])
 
     def get_next(self):
         return next(self.data, None)
-
 
 def export_and_quantize():
     os.makedirs("models", exist_ok=True)
