@@ -51,7 +51,7 @@ class EdgeStreamEngine:
             if cap is not None:
                 ret, frame = cap.read()
 
-if not ret:
+            if not ret:
                 # Reverted to hard-edged boolean masks to perfectly match dataset.py distribution
                 gray_256 = np.random.rayleigh(scale=85, size=(256, 256))
                 cx, cy = 128, 128
