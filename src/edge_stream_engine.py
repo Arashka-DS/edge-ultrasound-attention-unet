@@ -8,9 +8,8 @@ import numpy as np
 import onnxruntime as ort
 from src.postprocessing import UltrasoundPreprocessor, TemporalMaskStabilizer, overlay_mask
 
-
 class EdgeStreamEngine:
-    def __init__(self, model_path: str = "models/vascular_unet_int8.onnx", source=None):
+    def __init__(self, model_path: str = "models/vascular_unet_fp32.onnx", source=None):
         self.source = source
         self.frame_queue = queue.Queue(maxsize=2)
         self.result_queue = queue.Queue(maxsize=2)
@@ -24,45 +23,59 @@ class EdgeStreamEngine:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"ONNX Model not found at {model_path}. Run export_onnx.py first.")
 
+        # Pointing to CPU FP32 to avoid software emulation latency
         self.session = ort.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
         self.preprocessor = UltrasoundPreprocessor(clip_limit=2.0)
         self.stabilizer = TemporalMaskStabilizer(alpha=0.7)
 
     def capture_worker(self):
-        """Thread 1: Ingests frames and buffers the 3-frame temporal window."""
-        cap = cv2.VideoCapture(self.source) if self.source is not None else None
+        """Thread 1: Ingests frames, auto-detects cameras, and buffers the temporal window."""
+        cap = None
+        
+        # 1. Attempt explicit source if provided
+        if self.source is not None:
+            cap = cv2.VideoCapture(self.source)
+        # 2. Attempt default system camera
+        else:
+            cap = cv2.VideoCapture(0)
+            
+        if cap is None or not cap.isOpened():
+            print("No physical camera detected. Falling back to synthetic ultrasound simulator.")
+            cap = None
+            
         temporal_buffer = collections.deque(maxlen=3)
         t_step = 0
 
         while not self.stopped:
             ret = False
-            if cap is not None and cap.isOpened():
+            if cap is not None:
                 ret, frame = cap.read()
 
             if not ret:
-                # Native 256x256 generator to preserve spatial acoustic frequencies
+                # Upgraded Synthetic Simulator: Native 256x256 with smooth anti-aliased lumen
                 gray_256 = np.random.rayleigh(scale=85, size=(256, 256))
                 cx, cy = 128, 128
 
-                # Pulsatile lumen dynamics
-                rx = 32 + int(6 * np.sin(t_step * 0.3))
-                ry = 24 + int(6 * np.sin(t_step * 0.3))
+                # Smoother pulsatile dynamics
+                rx = 32.0 + 6.0 * np.sin(t_step * 0.25)
+                ry = 24.0 + 6.0 * np.sin(t_step * 0.25)
 
                 y, x = np.ogrid[:256, :256]
-                lumen = ((x - cx) ** 2) / (rx ** 2) + ((y - cy) ** 2) / (ry ** 2) <= 1.0
-                gray_256[lumen] = gray_256[lumen] * 0.25
+                # Calculate distance field for anti-aliasing the vessel edge
+                dist = np.sqrt(((x - cx)**2) / (rx**2) + ((y - cy)**2) / (ry**2))
+                
+                # Soft blending for vessel walls
+                lumen_mask = np.clip(1.5 - dist, 0.0, 1.0)
+                gray_256 = gray_256 * (1.0 - (0.75 * lumen_mask))
 
                 frame_uint8 = np.clip(gray_256, 0, 255).astype(np.uint8)
-
-                # Process 256x256 identically to dataset.py
                 norm_frame, _ = self.preprocessor.process_frame(frame_uint8, target_size=256)
 
-                # Upscale strictly for presentation display
                 display_frame = cv2.resize(frame_uint8, (640, 480), interpolation=cv2.INTER_LINEAR)
                 display_frame = cv2.cvtColor(display_frame, cv2.COLOR_GRAY2BGR)
 
                 t_step += 1
-                time.sleep(0.04)  # ~25 FPS
+                time.sleep(0.04)
             else:
                 norm_frame, _ = self.preprocessor.process_frame(frame, target_size=256)
                 display_frame = frame
@@ -78,7 +91,7 @@ class EdgeStreamEngine:
             cap.release()
 
     def inference_worker(self):
-        """Thread 2: Executes conditional ONNX inference and postprocessing."""
+        """Thread 2: Executes ONNX inference."""
         while not self.stopped:
             try:
                 raw_frame, tensor = self.frame_queue.get(timeout=1.0)
@@ -87,9 +100,7 @@ class EdgeStreamEngine:
 
             t_start = time.perf_counter()
             outputs = self.session.run(None, {"temporal_input": tensor})
-            contact_logit = outputs[0][0][0]
-            vessel_logit = outputs[1][0][0]
-            seg_logits = outputs[2][0][0]
+            contact_logit, vessel_logit, seg_logits = outputs[0][0][0], outputs[1][0][0], outputs[2][0][0]
 
             contact_prob = 1.0 / (1.0 + np.exp(-contact_logit))
             vessel_prob = 1.0 / (1.0 + np.exp(-vessel_logit))
@@ -97,53 +108,19 @@ class EdgeStreamEngine:
             display_frame = raw_frame.copy()
             latency_ms = (time.perf_counter() - t_start) * 1000
 
-            # Quantization-tolerant threshold
             if contact_prob < 0.40:
                 self.stabilizer.reset()
-                cv2.putText(
-                    display_frame,
-                    f"PROBE STATUS: NO CONTACT ({contact_prob*100:.1f}%)",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 0, 255),
-                    2,
-                )
+                cv2.putText(display_frame, f"PROBE STATUS: NO CONTACT ({contact_prob*100:.1f}%)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
             elif vessel_prob < 0.40:
                 self.stabilizer.reset()
-                cv2.putText(
-                    display_frame,
-                    f"SCANNING: NO VESSEL ({vessel_prob*100:.1f}%)",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 165, 255),
-                    2,
-                )
+                cv2.putText(display_frame, f"SCANNING: NO VESSEL ({vessel_prob*100:.1f}%)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 165, 255), 2)
             else:
                 raw_mask = (seg_logits > 0.0).astype(np.uint8)
                 smoothed_mask = self.stabilizer.update(raw_mask)
                 display_frame = overlay_mask(display_frame, smoothed_mask, color=(0, 255, 0), alpha=0.45)
-                cv2.putText(
-                    display_frame,
-                    f"VESSEL DETECTED ({vessel_prob*100:.1f}%)",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 255, 0),
-                    2,
-                )
+                cv2.putText(display_frame, f"VESSEL DETECTED ({vessel_prob*100:.1f}%)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
 
-            # Telemetry readout
-            cv2.putText(
-                display_frame,
-                f"Latency: {latency_ms:.1f} ms | FPS: {1000/max(latency_ms, 1.0):.1f} | Contact: {contact_prob*100:.0f}%",
-                (20, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                1,
-            )
+            cv2.putText(display_frame, f"Latency: {latency_ms:.1f} ms | FPS: {1000/max(latency_ms, 1.0):.1f} | Contact: {contact_prob*100:.0f}%", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
             if not self.result_queue.full():
                 self.result_queue.put(display_frame)
@@ -169,8 +146,7 @@ class EdgeStreamEngine:
             self.stopped = True
             cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
-    # Engine now loads the FP16 edge model
-    engine = EdgeStreamEngine(model_path="models/vascular_unet_fp16.onnx", source=None)
+    # Point explicitly to the FP32 model for pure CPU execution
+    engine = EdgeStreamEngine(model_path="models/vascular_unet_fp32.onnx")
     engine.run()
