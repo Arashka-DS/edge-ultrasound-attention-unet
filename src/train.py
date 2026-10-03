@@ -43,7 +43,8 @@ def train_model(epochs: int = 5, batch_size: int = 8, lr: float = 1e-3):
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     model = VascularAttentionUNet(pretrained=True).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    # Filter the optimizer to only update the unfrozen decoder and linear heads
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=1e-4)
 
     criterion_bce = nn.BCEWithLogitsLoss()
     criterion_dice = DiceLoss()
