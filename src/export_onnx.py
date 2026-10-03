@@ -1,13 +1,14 @@
 import os
 import torch
 import onnx
-from onnxruntime.quantization import quantize_dynamic, QuantType
+from onnxruntime.quantization import quantize_dynamic, QuantType, shape_inference
 from src.model import VascularAttentionUNet
 
 
 def export_and_quantize():
     os.makedirs("models", exist_ok=True)
     pytorch_weights = "models/vascular_attention_unet.pth"
+    prepped_onnx_path = "models/vascular_unet_prep.onnx"
     fp32_onnx_path = "models/vascular_unet_fp32.onnx"
     int8_onnx_path = "models/vascular_unet_int8.onnx"
 
@@ -40,10 +41,18 @@ def export_and_quantize():
     onnx.checker.check_model(onnx_model)
     print(f"ONNX FP32 export verified: {fp32_onnx_path}")
 
-    # INT8 Dynamic Quantization for edge CPU execution
+    # Preprocessing
+    print("Pre-processing ONNX graph for shape inference...")
+    shape_inference.quant_pre_process(
+        input_model_path=fp32_onnx_path,
+        output_model_path=prepped_onnx_path,
+        skip_symbolic_shape=False,
+    )
+
+    # INT8 Quantization
     print("Performing INT8 Dynamic Quantization for bare-metal CPU...")
     quantize_dynamic(
-        model_input=fp32_onnx_path,
+        model_input=prepped_onnx_path,
         model_output=int8_onnx_path,
         weight_type=QuantType.QInt8,
     )
